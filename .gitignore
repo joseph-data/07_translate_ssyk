@@ -1,0 +1,12 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+.venv/
+env/
+venv/
+
+*.html
+README_files
+
