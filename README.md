@@ -25,7 +25,8 @@ The translation files contained in `02_translation_files` are obtained from
 
 ### Prerequisites
 
-- Python 3.9+ with `pip`
+- Python 3.14+ (aligned with `pyproject.toml` / `uv.lock`)
+- `uv` (recommended) or `pip`
 - The bundled Excel files in (already included here; keep names/paths unchanged if you replace them):
   - `01_original_data/daioe_ssyk96.xlsx`
   - `01_original_data/daioe_ssyk2012.xlsx`
@@ -34,10 +35,19 @@ The translation files contained in `02_translation_files` are obtained from
 
 ## Quick start
 
+Using `uv` (recommended):
+```bash
+uv venv .venv
+source .venv/bin/activate
+uv sync
+python translation.py
+```
+
+Using `pip`:
 ```bash
 python -m venv .venv
-source .venv/bin/activate  
-pip install -r requirements.txt
+source .venv/bin/activate
+pip install pandas openpyxl pathlib
 python translation.py
 ```
 
@@ -59,7 +69,8 @@ Wrote: 03_translated_files/daioe_ssyk2012_translated.csv
 - `01_original_data/`: source Excel workbooks to be translated.
 - `02_translation_files/`: lookup tables with English titles.
 - `03_translated_files/`: generated CSVs, created on run (existing files are overwritten).
-- `requirements.txt`: pinned dependencies for reproducible runs.
+- `pyproject.toml`: project metadata and dependency declarations.
+- `uv.lock`: pinned dependency lock file for reproducible `uv` installs.
 
 ## How it works
 
