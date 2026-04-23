@@ -1,15 +1,31 @@
-## Local Dev
-.DS_Store
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
-*.egg-info/
-.env
+*$py.class
+
+# Virtual Environments (uv/pip)
 .venv/
-env/
 venv/
+env/
+.env
 
-*.html
-README_files
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
 
+# Tooling
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+
+# OS and Editors
+.DS_Store
+.vscode/
+.idea/
+
+# Excel temporary files
+~$*.xlsx
+
+# Local Python version
 .python-version
-

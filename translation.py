@@ -1,153 +1,165 @@
-"""Translate SSYK classification labels to English and save enriched files."""
+"""
+Translate SSYK classification labels to English using Polars.
+
+This script replaces Swedish SSYK codes/labels with English translations
+from provided mapping files, preserving the original structure but
+enriching specific columns.
+"""
 
 from pathlib import Path
-import re
 
 import pandas as pd
+import polars as pl
 
+# Directory Setup
 BASE_DIR = Path(__file__).resolve().parent
 ORIGINAL_DIR = BASE_DIR / "01_original_data"
 TRANSLATION_DIR = BASE_DIR / "02_translation_files"
 OUTPUT_DIR = BASE_DIR / "03_translated_files"
 
-# Level -> (sheet name, code length)
+# Taxonomy Configuration
+# Level -> {sheet_name, digit_length, rows_to_skip}
 LEVEL_SPECS = {
-    "ssyk96": {1: ("Level_1", 1), 2: ("Level_2", 2), 3: ("Level_3", 3), 4: ("Level_4", 4)},
-    "ssyk2012": {1: ("1-digit", 1), 2: ("2-digit", 2), 3: ("3-digit", 3), 4: ("4-digit", 4)},
+    "ssyk96": {
+        1: {"sheet": "Level_1", "digits": 1, "skip": 0},
+        2: {"sheet": "Level_2", "digits": 2, "skip": 0},
+        3: {"sheet": "Level_3", "digits": 3, "skip": 0},
+        4: {"sheet": "Level_4", "digits": 4, "skip": 0},
+    },
+    "ssyk2012": {
+        1: {"sheet": "1-digit", "digits": 1, "skip": 3},
+        2: {"sheet": "2-digit", "digits": 2, "skip": 3},
+        3: {"sheet": "3-digit", "digits": 3, "skip": 3},
+        4: {"sheet": "4-digit", "digits": 4, "skip": 3},
+    },
 }
 
 
-def normalize_code(value, digits):
-    """Extract numeric code prefix and zero-pad to the expected digit length."""
-    if pd.isna(value):
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    # Only consider the leading number chunk (before any text).
-    match = re.match(r"^([0-9]+)", text)
-    if not match:
-        return None
-    return match.group(1).zfill(digits)
+def normalize_code_expr(col: str, digits: int) -> pl.Expr:
+    """
+    Polars expression to normalize SSYK codes.
+
+    Extracts the leading numeric portion, strips whitespace, and zero-pads
+    to the required length.
+    """
+    return (
+        pl.col(col)
+        .cast(pl.String)
+        .str.strip_chars()
+        .str.extract(r"^(\d+)", 1)
+        .str.zfill(digits)
+    )
 
 
-def load_ssyk96_translations():
-    """Load SSYK96 translations for all levels."""
-    path = TRANSLATION_DIR / "ssyk96_en.xlsx"
-    sheet_names = {1: "Level_1", 2: "Level_2", 3: "Level_3", 4: "Level_4"}
-    mapping = {}
-    for level, sheet in sheet_names.items():
-        digits = LEVEL_SPECS["ssyk96"][level][1]
-        df = pd.read_excel(path, sheet_name=sheet, usecols=[0, 1])
-        df.columns = ["code", "occupation_title"]
-        df = df.dropna(subset=["code", "occupation_title"])
-        df["code"] = df["code"].apply(lambda v: normalize_code(v, digits))
-        df = df.dropna(subset=["code"])
-        mapping[level] = df.set_index("code")["occupation_title"].to_dict()
-    return mapping
+def load_translation_map(taxonomy: str) -> dict[int, dict[str, str]]:
+    """
+    Load all levels of translation for a given taxonomy.
 
+    Returns a dictionary mapping level (1-4) to a lookup table (code -> "code Title").
+    """
+    map_path = TRANSLATION_DIR / f"{taxonomy}_en.xlsx"
+    taxonomy_lookup = {}
 
-def load_ssyk2012_translations():
-    """Load SSYK2012 translations for all levels."""
-    path = TRANSLATION_DIR / "ssyk2012_en.xlsx"
-    sheet_names = {1: "1-digit", 2: "2-digit", 3: "3-digit", 4: "4-digit"}
-    mapping = {}
-    for level, sheet in sheet_names.items():
-        digits = LEVEL_SPECS["ssyk2012"][level][1]
-        df = pd.read_excel(
-            path, sheet_name=sheet, skiprows=3, names=["code", "occupation_title"], usecols=[0, 1]
+    for level, spec in LEVEL_SPECS[taxonomy].items():
+        # Polars read_excel requires extra dependencies (fastexcel/calamine).
+        # We use pandas as a reliable intermediate since it's already in the environment.
+        pdf = pd.read_excel(
+            map_path,
+            sheet_name=spec["sheet"],
+            skiprows=spec["skip"],
+            usecols=[0, 1],
+            names=["code", "title"],
         )
-        df = df.dropna(subset=["code", "occupation_title"])
-        df["code"] = df["code"].apply(lambda v: normalize_code(v, digits))
-        df = df.dropna(subset=["code"])
-        mapping[level] = df.set_index("code")["occupation_title"].to_dict()
-    return mapping
+
+        # Convert to Polars using dict to avoid pyarrow dependency
+        df = (
+            pl.DataFrame(pdf.to_dict(orient="list"))
+            .drop_nulls()
+            .with_columns(
+                norm_code=normalize_code_expr("code", spec["digits"]),
+            )
+            .filter(pl.col("norm_code").is_not_null())
+        )
+
+        # Build the mapping dictionary: {norm_code: "norm_code Title"}
+        lookup = {
+            row["norm_code"]: f"{row['norm_code']} {row['title']}"
+            for row in df.select(["norm_code", "title"]).to_dicts()
+        }
+        taxonomy_lookup[level] = lookup
+
+    return taxonomy_lookup
 
 
-def translate_dataframe(df, taxonomy, translation_map):
-    """Replace SSYK level columns with English labels (same column names)."""
-    df = df.copy()
-    stats = {}
+def process_taxonomy(taxonomy: str) -> None:
+    """Load, translate, and save data for a specific SSYK taxonomy using LazyFrames."""
+    print(f"--- Translating {taxonomy.upper()} (Lazy Mode) ---")
+
+    # Load original data
+    input_path = ORIGINAL_DIR / f"daioe_{taxonomy}.xlsx"
+    if not input_path.exists():
+        print(f"Error: {input_path} not found.")
+        return
+
+    # Use pandas as intermediate for Excel reading, then convert to LazyFrame
+    pdf_original = pd.read_excel(input_path)
+    lf = pl.DataFrame(pdf_original.to_dict(orient="list")).lazy()
+
+    # Load translations
+    translation_maps = load_translation_map(taxonomy)
+
+    # We'll keep track of the normalized columns to calculate stats at the end
+    norm_cols = []
+
+    # Build the lazy pipeline level by level
     for level in range(1, 5):
-        col = f"{taxonomy}_{level}"
-        if col not in df.columns:
+        col_name = f"{taxonomy}_{level}"
+        if col_name not in lf.collect_schema().names():
             continue
 
-        digits = LEVEL_SPECS[taxonomy][level][1]
-        translated_col = []
-        success = 0
-        total_codes = 0
-        unmatched_codes = set()
+        digits = LEVEL_SPECS[taxonomy][level]["digits"]
+        mapping = translation_maps.get(level, {})
+        norm_col_name = f"_norm_{level}"
+        norm_cols.append((level, col_name, norm_col_name, mapping))
 
-        for value in df[col]:
-            code = normalize_code(value, digits)
-            english = translation_map.get(level, {}).get(code)
-            if code and english:
-                translated_value = f"{code} {english}"
-            else:
-                # Keep original value if no translation to preserve data shape
-                translated_value = value
-            translated_col.append(translated_value)
-            if code is not None:
-                total_codes += 1
-                if english is not None:
-                    success += 1
-                else:
-                    unmatched_codes.add(code)
+        # 1. Create a normalized version of the column for matching/stats
+        # 2. Use replace_strict to swap normalized codes with "Code Title"
+        lf = lf.with_columns(
+            pl.Series(norm_col_name, [None], dtype=pl.String), # Placeholder for schema
+        ).with_columns(
+            **{norm_col_name: normalize_code_expr(col_name, digits)},
+        ).with_columns(
+            **{col_name: pl.col(norm_col_name).replace_strict(mapping, default=pl.col(col_name))},
+        )
 
-        df[col] = translated_col
-        stats[level] = {
-            "total_codes": total_codes,
-            "translated": success,
-            "missing": total_codes - success,
-            "unmatched_codes": unmatched_codes,
-        }
+    # Collect the final result
+    df = lf.collect()
 
-    return df, stats
+    # Calculate and print match statistics using the collected data
+    for level, _col_name, norm_col_name, mapping in norm_cols:
+        total_with_code = df.filter(pl.col(norm_col_name).is_not_null()).height
+        match_keys = list(mapping.keys())
+        matched_count = df.filter(pl.col(norm_col_name).is_in(match_keys)).height
+
+        missing = total_with_code - matched_count
+        print(f"  Level {level}: Matched {matched_count:4} / {total_with_code:4} (Missing: {missing})")
+
+    # Clean up temporary normalization columns and save
+    temp_cols = [nc[2] for nc in norm_cols]
+    df = df.drop(temp_cols)
+
+    # Save enriched data
+    output_path = OUTPUT_DIR / f"daioe_{taxonomy}_translated.csv"
+    df.write_csv(output_path)
+    print(f"Result saved to: {output_path}\n")
 
 
-def main():
+def main() -> None:
+    """Main entry point."""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    ssyk96_map = load_ssyk96_translations()
-    df_96 = pd.read_excel(ORIGINAL_DIR / "daioe_ssyk96.xlsx")
-    df_96, stats_96 = translate_dataframe(df_96, "ssyk96", ssyk96_map)
-    out_96 = OUTPUT_DIR / "daioe_ssyk96_translated.csv"
-    df_96.to_csv(out_96, index=False)
-    print("SSYK96 translation:")
-    for level, level_stats in sorted(stats_96.items()):
-        missing = level_stats["missing"]
-        unmatched = sorted(level_stats["unmatched_codes"])
-        msg = (
-            f"  Level {level}: translated {level_stats['translated']} / {level_stats['total_codes']} "
-            f"(missing {missing})"
-        )
-        if missing:
-            msg += f" | unmatched codes sample: {unmatched[:5]}"
-        else:
-            msg += " | all codes matched"
-        print(msg)
-    print(f"Wrote: {out_96}")
-
-    ssyk2012_map = load_ssyk2012_translations()
-    df_2012 = pd.read_excel(ORIGINAL_DIR / "daioe_ssyk2012.xlsx")
-    df_2012, stats_2012 = translate_dataframe(df_2012, "ssyk2012", ssyk2012_map)
-    out_2012 = OUTPUT_DIR / "daioe_ssyk2012_translated.csv"
-    df_2012.to_csv(out_2012, index=False)
-    print("SSYK2012 translation:")
-    for level, level_stats in sorted(stats_2012.items()):
-        missing = level_stats["missing"]
-        unmatched = sorted(level_stats["unmatched_codes"])
-        msg = (
-            f"  Level {level}: translated {level_stats['translated']} / {level_stats['total_codes']} "
-            f"(missing {missing})"
-        )
-        if missing:
-            msg += f" | unmatched codes sample: {unmatched[:5]}"
-        else:
-            msg += " | all codes matched"
-        print(msg)
-    print(f"Wrote: {out_2012}")
+    process_taxonomy("ssyk96")
+    process_taxonomy("ssyk2012")
 
 
 if __name__ == "__main__":
