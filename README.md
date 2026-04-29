@@ -1,5 +1,9 @@
 # SSYK Translation Utility
 
+<p align="left">
+  <img src="logos/lab.svg" alt="AI-Econ Lab logo" width="200" height="">
+</p>
+
 This repository contains the script and lookup files used to translate Swedish
 SSYK occupation classification labels in DAIOE data into English.
 
