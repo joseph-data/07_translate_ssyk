@@ -29,3 +29,4 @@ dist/
 
 # Local Python version
 .python-version
+.codex
